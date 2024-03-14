@@ -1,0 +1,235 @@
+---
+title: "Simulation-model-selection"
+author: "Sahoko"
+date: "11/8/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## setting
+```{r}
+path = '~/GitHub/Imputation-Additive-GP-Kronecker/'
+path2 = '~/GitHub/ANOVA-GP-model-selection/'
+library(ggplot2)
+library(plyr)
+library(cmdstanr)
+library(rstan)
+rstan_options(auto_write = TRUE)
+library(bridgesampling)
+source(paste0(path,'Code/R/GP_helpers.R'))
+source(paste0(path,'Code/R/kernels.R'))
+#source(paste0(path,'Code/R/fBM_mllik.R'))
+#source(paste0(path,'Code/R/SE_lmlik.R'))
+#source(paste0(path,'Code/R/GP_prediction.R'))
+```
+
+# Synthetic data generation 
+```{r}
+n = 20
+x = seq(-5,5,length.out=n)
+X1 = matrix(x,n,1)
+X3 = X2 = X1
+Hurst = c(0.5,0.5, 0.5)
+alpha0 = 1
+alpha1 = 0.5
+alpha2 = 0.8
+alpha3 = 0.3
+sigma = 1
+K1 =  (alpha1^2) * sq_cen_fBM_kernel_mat(X1, Hurst[1])
+K2 =  (alpha2^2) *sq_cen_fBM_kernel_mat(X2, Hurst[2])
+K3 =  (alpha3^2) *sq_cen_fBM_kernel_mat(X3, Hurst[3])
+N = n^3
+Jn = matrix(1,n,n)
+E1 = cen_eigen(K1)
+E2 = cen_eigen(K2)
+E3 = cen_eigen(K3)
+Q1 = E1$vectors
+Q2 = E2$vectors
+Q3 = E3$vectors
+l1 = E1$values
+l2 = E2$values
+l3 = E3$values
+```
+
+### Model number
+1. Main 
+2. Main + 12
+3. Main + 13
+4. Main + 23
+5. Main + 12 + 13
+6. Main + 12 + 23
+7. Main + 13 + 23
+8. Main + 12 + 13 + 23 
+9. Main + 12 + 13 + 23 + 123
+
+```{r}
+for (model_num in 1:9){
+  ones = rep(0,n); ones[1] = n
+  lambda = c(tcrossprod(ones,c(tcrossprod(ones,ones)))) + c(tcrossprod(ones,c(tcrossprod(ones,l1)))) + c(tcrossprod(ones,c(tcrossprod(l2,ones)))) + c(tcrossprod(l3,c(tcrossprod(ones,ones))))
+  ## Adding 12 term
+  if (model_num %in%  c(2,5,6,8,9)){
+    lambda = lambda + c(tcrossprod(ones,c(tcrossprod(l2,l1))))
+  }
+  ## adding 13 term
+  if (model_num %in% c(3,5,7,8,9)){
+    lambda = lambda + c(tcrossprod(l3,c(tcrossprod(ones,l1))))
+  }
+  # adding 23 term
+  if (model_num %in% c(4,6,7,8,9)){
+    lambda = lambda + c(tcrossprod(l3,c(tcrossprod(l2,ones))))
+  }
+  ## addint 123 term
+  if (model_num==9){
+    lambda = lambda + c(tcrossprod(l3,c(tcrossprod(l2,l1))))
+  }
+  lambda = (alpha0^2)*lambda
+  saveRDS(lambda, paste0(path2,'Data/Simulation/lambda_model',as.character(model_num),'.Rdata'))
+}
+```
+
+
+```{r}
+y_sampling = function(model_num, n,d, Q1, Q2, Q3, sigma, seed){
+  set.seed(seed)
+  eta = rnorm(n^d,0,1)
+  lambda = readRDS(paste0(path2,'Data/Simulation/lambda_model',as.character(model_num),'.Rdata'))
+  lambda = lambda + sigma^2
+  sqrt_l = sqrt(lambda)
+  m = sqrt_l * eta
+  s = m 
+  s = mat_vec_prod(Q3, s, n, n^2)
+  s = mat_vec_prod(Q2, s, n, n^2)
+  s = mat_vec_prod(Q1, s, n, n^2)
+  y = s
+  return(y)
+}
+```
+
+```{r}
+y = y_sampling(1, n,3, Q1, Q2, Q3, sigma, seed=123)
+```
+
+
+```{r}
+stan_path = paste0(path2,'Code/Stan/')
+for (i in 1:9){
+ stan_file = paste0(stan_path,'est_model',as.character(i),'.stan') 
+ mod = cmdstan_model(stan_file,  include_paths = stan_path) 
+}
+
+for (i in 1:9){
+ stan_file = paste0(stan_path,'lmlik_model',as.character(i),'.stan') 
+ mod = cmdstan_model(stan_file,  include_paths = stan_path) 
+}
+```
+
+
+```{r}
+j = 8
+stan_file = paste0(stan_path,'est_model',as.character(j),'.stan') # Using SE kernel
+mod = cmdstan_model(stan_file,  include_paths = stan_path)
+#stan_file_mlik = paste0(stan_path,'GPst_pred_sqcenfBM.stan')
+#modpred = cmdstan_model(stan_file_pred,  include_paths = stan_path)
+```
+
+```{r}
+# for fBM kernel
+data = list(N1 = n, N2 = n, N3 = n, X1 = X1, X2 = X2, X3 = X3, y = y, Hurst1 = 0.5, Hurst2 = 0.5, Hurst3 = 0.5)
+
+```
+MCMC sampling
+```{r}
+fit = mod$sample(
+  data = data, 
+  #seed = 725, 
+  seed = 3283,
+  iter_warmup = 200,
+  iter_sampling = 300,
+  save_warmup = TRUE,
+  chains = 2, 
+  parallel_chains = 2,
+  refresh = 100
+)
+fit_optim = mod$optimize(data = data, seed=763)
+```
+
+
+```{r}
+stanfit = rstan::read_stan_csv(fit$output_files())
+fit$save_output_files(dir = paste0(path2,"Output"), basename = paste0('model', as.character(j)), timestamp = TRUE, random = TRUE)
+```
+
+```{r}
+params = c('alpha0','alpha1','alpha2','alpha3','sigma') #BM kernel
+post_mean = fit$summary(variables = params)$mean
+fit$summary(variables = append(params, 'lp__'))
+fit$summary(variables = 'lp__')$mean
+fit_optim$summary()
+post_mean
+## -4061.6479333
+## -4097.91
+## -4089.264
+## -4086.112
+## -4108.308
+## -4109.631
+## -4099.976
+## -4103.115
+## -4107.016
+```
+
+```{r}
+post_samples = fit$draws(format = "df",  inc_warmup = F)
+post_samples$chain = as.character(post_samples$.chain)
+for (i in 1:length(params)){
+  gg = ggplot(data=post_samples, aes_string(x=".iteration", y = params[i], color="chain"))+
+  geom_line() + theme_minimal() 
+  print(gg)
+}
+```
+```{r}
+j = 2
+stan_file = paste0(stan_path,'est_model',as.character(j),'.stan') # Using SE kernel
+new_model <- rstan::stan(stan_file, iter =1, chains = 2, data = data)
+j = 1
+stan_file = paste0(stan_path,'est_model',as.character(j),'.stan') # Using SE kernel
+stan_mod = stan_model(stan_file)
+new_model = sampling(stan_mod, iter =1, chains = 2, data = data)
+
+for (j in 3:9){
+  stan_file = paste0(stan_path,'est_model',as.character(j),'.stan') # Using SE kernel
+  stan_mod = stan_model(stan_file)
+  new_model = sampling(stan_mod, iter =1, chains = 2, data = data)
+}
+```
+
+```{r}
+library(bridgesampling)
+b = bridge_sampler(samples = stanfit , stanfit_model = new_model)
+#-4065.389
+#-4103.266
+#-4094.482
+#-4091.196
+#-4114.013
+#-4115.597
+#-4105.821
+#-4109.118
+#-4113.325
+```
+```{r}
+lmlik_file = paste0(stan_path,'lmlik_model',as.character(1),'.stan') 
+lmlikmod =  cmdstan_model(lmlik_file,  include_paths = stan_path) 
+data = list(N1 = n, N2 = n, N3 = n, X1 = X1, X2 = X2, X3 = X3, y = y, Hurst1 = 0.5, Hurst2 = 0.5, Hurst3 = 0.5, 
+            alpha0=post_mean[1], alpha1=post_mean[2], alpha2=post_mean[3], alpha3=post_mean[4], sigma=post_mean[5])
+mllik = lmlikmod$sample(
+  data = data, 
+  iter_warmup = 0,
+  iter_sampling = 1,
+  chains = 1, 
+  refresh = 1,
+  fixed_param = TRUE)
+mllik$summary()$mean
+```
+

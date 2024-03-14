@@ -1,0 +1,227 @@
+---
+title: "Simulation_prep"
+author: "Sahoko"
+date: "11/9/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## setting
+```{r}
+path = '~/GitHub/Imputation-Additive-GP-Kronecker/'
+base_path = '~/GitHub/ANOVA-GP-model-selection/'
+stan_path = paste0(base_path,'Code/Stan/')
+source(paste0(path,'Code/R/GP_helpers.R'))
+source(paste0(path,'Code/R/kernels.R'))
+library(ggplot2)
+library(plyr)
+library(cmdstanr)
+library(rstan)
+rstan_options(auto_write = TRUE)
+library(bridgesampling)
+```
+
+```{r}
+n = 20
+x = seq(-5,5,length.out=n)
+X1 = matrix(x,n,1)
+X3 = X2 = X1
+Hurst = c(0.5,0.5, 0.5)
+alpha0 = 1
+alpha1 = 0.5
+alpha2 = 0.8
+alpha3 = 0.3
+#sigma = 1
+sigma = 2
+K1 =  (alpha1^2) * sq_cen_fBM_kernel_mat(X1, Hurst[1])
+K2 =  (alpha2^2) *sq_cen_fBM_kernel_mat(X2, Hurst[2])
+K3 =  (alpha3^2) *sq_cen_fBM_kernel_mat(X3, Hurst[3])
+E1 = cen_eigen(K1)
+E2 = cen_eigen(K2)
+E3 = cen_eigen(K3)
+Q1 = E1$vectors
+Q2 = E2$vectors
+Q3 = E3$vectors
+l1 = E1$values
+l2 = E2$values
+l3 = E3$values
+params = c('alpha0','alpha1','alpha2','alpha3','sigma') #BM kernel
+```
+
+```{r}
+y_sampling = function(model_num, n,d, Q1, Q2, Q3, sigma, seed){
+  set.seed(seed)
+  eta = rnorm(n^d,0,1)
+  lambda = readRDS(paste0(base_path,'Data/Simulation/lambda_model',as.character(model_num),'.Rdata'))
+  lambda = lambda + sigma^2
+  sqrt_l = sqrt(lambda)
+  m = sqrt_l * eta
+  s = m 
+  s = mat_vec_prod(Q3, s, n, n^2)
+  s = mat_vec_prod(Q2, s, n, n^2)
+  s = mat_vec_prod(Q1, s, n, n^2)
+  y = s
+  return(y)
+}
+```
+
+## Experiment setting
+```{r}
+set.seed(2749)
+N_exp = 50
+true_mod_list = sample(c(1:9),N_exp, replace = TRUE)
+true_mod_list
+seed_list = sample(c(1:9999), N_exp)
+seed_list
+cnames = rep(NA,19)
+cnames[1] = 'true_model'
+for (i in 1:9){
+  cnames[1 + i] = paste0('est_lmlik',as.character(i))
+  cnames[1 + 9 + i] = paste0('bridge_lmlik',as.character(i))
+}
+df_res = data.frame(matrix(NA,N_exp,19))
+colnames(df_res) = cnames
+df_res$true_model = true_mod_list
+
+
+#df_res_tmp = data.frame(matrix(NA,10,19))
+#colnames(df_res_tmp) = cnames
+#df_res = rbind(df_res,df_res_tmp)
+#df_res_save = df_res
+
+```
+
+```{r}
+for (j in 11:20){
+  seed = seed_list[j]
+  mod_number = true_mod_list[j]
+  set.seed(seed)
+  y = y_sampling(mod_number, n, 3, Q1, Q2, Q3, sigma, seed)
+  data = list(N1 = n, N2 = n, N3 = n, X1 = X1, X2 = X2, X3 = X3, 
+              y = y, Hurst1 = 0.5, Hurst2 = 0.5, Hurst3 = 0.5)
+  for(i in 1:9){
+    stan_file = paste0(stan_path,'est_model',as.character(i),'.stan') 
+    lmlik_file = paste0(stan_path,'lmlik_model',as.character(i),'.stan') 
+    mod = cmdstan_model(stan_file,  include_paths = stan_path) 
+    fit = mod$sample(
+          data = data, 
+          #seed = 725, 
+          seed = 3283,
+          iter_warmup = 200,
+          iter_sampling = 300,
+          save_warmup = TRUE,
+          chains = 2, 
+          parallel_chains = 2,
+          refresh = 100
+      )
+    stanfit = rstan::read_stan_csv(fit$output_files())
+    post_mean = fit$summary(variables = params)$mean
+    ## estimated loglik
+    data_mllik = list(N1 = n, N2 = n, N3 = n, X1 = X1, X2 = X2, X3 = X3, y = y, 
+                      Hurst1 = 0.5, Hurst2 = 0.5, Hurst3 = 0.5,
+                      alpha0=post_mean[1], alpha1=post_mean[2], alpha2=post_mean[3], 
+                      alpha3=post_mean[4], sigma=post_mean[5])
+    lmlikmod =  cmdstan_model(lmlik_file,  include_paths = stan_path)
+    mllik = lmlikmod$sample(
+                data = data_mllik, 
+                iter_warmup = 0,
+                iter_sampling = 1,
+                chains = 1, 
+                refresh = 1,
+                fixed_param = TRUE)
+    df_res[j,(1+i)] = mllik$summary()$mean
+    
+    ## bridge sampling
+    #stan_mod = stan_model(stan_file)
+    #new_model = sampling(stan_mod, iter =1, chains = 2, data = data)
+    #b = bridge_sampler(samples = stanfit , stanfit_model = new_model)
+    #df_res[j,(1+9+i)] =b$logml
+  }
+  write.csv(df_res, file=paste0(base_path,'Output/experiment_res50.csv'))
+}
+```
+## sigma = 2
+```{r}
+set.seed(1874)
+N_exp = 50
+true_mod_list = sample(c(1:9),N_exp, replace = TRUE)
+true_mod_list
+seed_list = sample(c(1:9999), N_exp)
+
+cnames = rep(NA,19)
+cnames[1] = 'true_model'
+for (i in 1:9){
+  cnames[1 + i] = paste0('est_lmlik',as.character(i))
+  cnames[1 + 9 + i] = paste0('bridge_lmlik',as.character(i))
+}
+df_res = data.frame(matrix(NA,(N_exp),19))
+colnames(df_res) = cnames
+df_res$true_model = true_mod_list
+table(true_mod_list)
+```
+
+```{r}
+for (j in 11:N_exp){
+  seed = seed_list[j]
+  mod_number = true_mod_list[j]
+  set.seed(seed)
+  y = y_sampling(mod_number, n, 3, Q1, Q2, Q3, sigma, seed)
+  data = list(N1 = n, N2 = n, N3 = n, X1 = X1, X2 = X2, X3 = X3, 
+              y = y, Hurst1 = 0.5, Hurst2 = 0.5, Hurst3 = 0.5)
+  for(i in 1:9){
+    stan_file = paste0(stan_path,'est_model',as.character(i),'.stan') 
+    lmlik_file = paste0(stan_path,'lmlik_model',as.character(i),'.stan') 
+    mod = cmdstan_model(stan_file,  include_paths = stan_path) 
+    fit = mod$sample(
+          data = data, 
+          #seed = 725, 
+          seed = 3283,
+          iter_warmup = 200,
+          iter_sampling = 300,
+          save_warmup = TRUE,
+          chains = 2, 
+          parallel_chains = 2,
+          refresh = 100
+      )
+    stanfit = rstan::read_stan_csv(fit$output_files())
+    post_mean = fit$summary(variables = params)$mean
+    ## estimated loglik
+    data_mllik = list(N1 = n, N2 = n, N3 = n, X1 = X1, X2 = X2, X3 = X3, y = y, 
+                      Hurst1 = 0.5, Hurst2 = 0.5, Hurst3 = 0.5,
+                      alpha0=post_mean[1], alpha1=post_mean[2], alpha2=post_mean[3], 
+                      alpha3=post_mean[4], sigma=post_mean[5])
+    lmlikmod =  cmdstan_model(lmlik_file,  include_paths = stan_path)
+    mllik = lmlikmod$sample(
+                data = data_mllik, 
+                iter_warmup = 0,
+                iter_sampling = 1,
+                chains = 1, 
+                refresh = 1,
+                fixed_param = TRUE)
+    df_res[j,(1+i)] = mllik$summary()$mean
+    
+    ## bridge sampling
+    stan_mod = stan_model(stan_file)
+    new_model = sampling(stan_mod, iter =1, chains = 2, data = data)
+    b = bridge_sampler(samples = stanfit , stanfit_model = new_model)
+    df_res[j,(1+9+i)] =b$logml
+  }
+  write.csv(df_res, file=paste0(base_path,'Output/experiment_res50_sigma2.csv'))
+}
+```
+
+```{r}
+est_model = c()
+bridge_model = c()
+for (j in 1:N_exp){
+  est_model[j] =   which(df_res[j,c(2:10)]==max(df_res[j,c(2:10)]))
+  bridge_model[j] = which(df_res[j,c(11:19)]==max(df_res[j,c(11:19)]))
+}
+df_res$true_model
+est_model
+bridge_model
+```
+
